@@ -1,5 +1,11 @@
 Revision history for Perl extension DBD::Mock.
 
+1.40 June 19, 2011
+    - Fixed bug rt44591 second preapre giving an error
+    - Fixed bug rt57981 warnings during clone
+    - Fixed bug rt63191 Synopsis errors
+    - Fixed bug rt66813 Google's group link in the POD
+
 1.39 November 9, 2008
     - If a statement handle had bound columns, then the fetch() and
       fetchrow_arrayref() methods never returned false. After they

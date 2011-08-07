@@ -7,7 +7,8 @@ WriteMakefile
           'VERSION_FROM' => 'lib/DBD/Mock.pm',
           'PREREQ_PM' => {
                            'DBI' => '1.3',
-                           'Test::More' => '0.47'
+                           'Test::More' => '0.47',
+                           'Test::Exception' => '0.31'
                          },
           'INSTALLDIRS' => 'site',
           'EXE_FILES' => [],

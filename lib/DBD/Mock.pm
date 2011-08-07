@@ -20,7 +20,7 @@ use warnings;
 
 require DBI;
 
-our $VERSION = '1.41';
+our $VERSION = '1.42';
 
 our $drh    = undef;    # will hold driver handle
 our $err    = 0;        # will hold any error codes
@@ -102,7 +102,7 @@ $DBD::Mock::dr::imp_data_size = 0;
 sub connect {
     my ($drh, $dbname, $user, $auth, $attributes) = @_;
     if ($drh->{'mock_connect_fail'} == 1) {
-        $drh->DBI::set_err(1, "Could not connect to mock database");
+        $drh->set_err(1, "Could not connect to mock database");
         return;
     }
     $attributes ||= {};
@@ -159,7 +159,7 @@ sub STORE {
         }
         elsif ($attr eq 'mock_data_sources') {
             if (ref($value) ne 'ARRAY') {
-                $drh->DBI::set_err(1, "You must pass an array ref of data sources");
+                $drh->set_err(1, "You must pass an array ref of data sources");
                 return;
             }
             return $drh->{'mock_data_sources'} = $value;
@@ -195,8 +195,19 @@ package
 
 use strict;
 use warnings;
+use Carp qw(croak);
 
 $DBD::Mock::db::imp_data_size = 0;
+
+
+sub set_err {
+    my ( $self, $err, $errStr ) = @_;
+    $self->SUPER::set_err($err,$errStr);
+    if ( $self->{RaiseError} ) {
+        croak $errStr;
+    }
+}
+
 
 sub ping {
      my ( $dbh ) = @_;
@@ -218,11 +229,11 @@ sub prepare {
     my($dbh, $statement) = @_;
 
     unless ($dbh->{mock_can_connect}) {
-        $dbh->DBI::set_err(1, "No connection present");
+        $dbh->set_err(1, "No connection present");
         return;
     }
     unless ($dbh->{mock_can_prepare}) {
-        $dbh->DBI::set_err(1, "Cannot prepare");
+        $dbh->set_err(1, "Cannot prepare");
         return;
     }
     $dbh->{mock_can_prepare}++ if $dbh->{mock_can_prepare} < 0;
@@ -241,7 +252,7 @@ sub prepare {
     if ($@) {
         my $parser_error = $@;
         chomp $parser_error;
-        $dbh->DBI::set_err(1, "Failed to parse statement. Error: ${parser_error}. Statement: ${statement}");
+        $dbh->set_err(1, "Failed to parse statement. Error: ${parser_error}. Statement: ${statement}");
         return;
     }
 
@@ -282,7 +293,7 @@ sub prepare {
      # connection present.
 
     unless ($dbh->FETCH('Active')) {
-        $dbh->DBI::set_err(1, "No connection present");
+        $dbh->set_err(1, "No connection present");
         return;
     }
 
@@ -310,7 +321,8 @@ sub prepare {
         if ($dbh->FETCH('AutoCommit')) {
             $dbh->STORE('AutoCommit', 0);
             $begin_work_commit = 1;
-            my $sth = $dbh->prepare( 'BEGIN WORK' );
+            my $sth = $dbh->prepare( 'BEGIN WORK' )
+                or return;
             my $rc = $sth->execute();
             $sth->finish();
             return $rc;
@@ -326,7 +338,8 @@ sub prepare {
             return $dbh->set_err(1, "commit ineffective with AutoCommit" );
         }
 
-        my $sth = $dbh->prepare( 'COMMIT' );
+        my $sth = $dbh->prepare( 'COMMIT' )
+            or return;
         my $rc = $sth->execute();
         $sth->finish();
 
@@ -344,7 +357,8 @@ sub prepare {
             return $dbh->set_err(1, "rollback ineffective with AutoCommit" );
         }
 
-        my $sth = $dbh->prepare( 'ROLLBACK' );
+        my $sth = $dbh->prepare( 'ROLLBACK' )
+            or return;
         my $rc = $sth->execute();
         $sth->finish();
 
@@ -389,6 +403,10 @@ sub selectcol_arrayref {
 sub FETCH {
     my ( $dbh, $attrib, $value ) = @_;
     $dbh->trace_msg( "Fetching DB attrib '$attrib'\n" );
+
+    if ( $attrib eq 'RaiseError' ) {
+        return $dbh->{RaiseError};
+    }
 
     if ($attrib eq 'Active') {
         return $dbh->{mock_can_connect};
@@ -435,6 +453,11 @@ sub STORE {
         $value = ($value) ? -901 : -900;
     }
 
+    if ( $attrib eq 'RaiseError' ) {
+        $dbh->{RaiseError} = $value;
+        return $value;
+    }
+
     if ( $attrib eq 'mock_clear_history' ) {
         if ( $value ) {
             $dbh->{mock_statement_history} = [];
@@ -455,7 +478,7 @@ sub STORE {
         unless ($is_valid_parser) {
             my $error = "Parser must be a code reference or object with 'parse()' " .
                         "method (Given type: '$parser_type')";
-            $dbh->DBI::set_err(1, $error);
+            $dbh->set_err(1, $error);
             return;
         }
         push @{$dbh->{mock_parser}}, $value;
@@ -573,10 +596,10 @@ sub bind_param_inout {
     my ($sth, $param_num, $val, $max_len) = @_;
     # check that $val is a scalar ref
     (UNIVERSAL::isa($val, 'SCALAR'))
-        || $sth->{Database}->DBI::set_err(1, "need a scalar ref to bind_param_inout, not $val");
+        || $sth->{Database}->set_err(1, "need a scalar ref to bind_param_inout, not $val");
     # check for positive $max_len
     ($max_len > 0)
-        || $sth->{Database}->DBI::set_err(1, "need to specify a maximum length to bind_param_inout");
+        || $sth->{Database}->set_err(1, "need to specify a maximum length to bind_param_inout");
     my $tracker = $sth->FETCH( 'mock_my_history' );
     $tracker->bound_param( $param_num, $val );
     return 1;
@@ -587,11 +610,11 @@ sub execute {
     my $dbh = $sth->{Database};
 
     unless ($dbh->{mock_can_connect}) {
-        $dbh->DBI::set_err(1, "No connection present");
+        $dbh->set_err(1, "No connection present");
         return 0;
     }
     unless ($dbh->{mock_can_execute}) {
-        $dbh->DBI::set_err(1, "Cannot execute");
+        $dbh->set_err(1, "Cannot execute");
         return 0;
     }
     $dbh->{mock_can_execute}++ if $dbh->{mock_can_execute} < 0;
@@ -599,7 +622,7 @@ sub execute {
     my $tracker = $sth->FETCH( 'mock_my_history' );
 
     if ($tracker->has_failure()) {
-        $dbh->DBI::set_err($tracker->get_failure());
+        $dbh->set_err($tracker->get_failure());
         return 0;
     }
 
@@ -609,17 +632,20 @@ sub execute {
 
     if (my $session = $dbh->{mock_session}) {
         eval {
+            my $state = $session->current_state;
             $session->verify_statement($dbh, $sth->{Statement});
             $session->verify_bound_params($dbh, $tracker->bound_params());
-            my $idx = $session->{state_index} - 1;
-            my @results = @{$session->{states}->[$idx]->{results}};
+
+            # Load a copy of the results to return (minus the field
+            # names) into the tracker
+            my @results = @{$state->{results}};
             shift @results;
             $tracker->{return_data} = \@results;
         };
         if ($@) {
             my $session_error = $@;
             chomp $session_error;
-            $dbh->DBI::set_err(1, "Session Error: ${session_error}");
+            $dbh->set_err(1, "Session Error: ${session_error}");
             return;
         }
     }
@@ -631,7 +657,8 @@ sub execute {
     # handle INSERT statements and the mock_last_insert_ids
     # We should only increment these things after the last successful INSERT.
     # -RobK, 2007-10-12
-#use Data::Dumper;warn Dumper $dbh->{mock_last_insert_ids};
+    #use Data::Dumper;warn Dumper $dbh->{mock_last_insert_ids};
+
     if ($dbh->{Statement} =~ /^\s*?insert\s+into\s+(\S+)/i) {
         if ( $dbh->{mock_last_insert_ids} && exists $dbh->{mock_last_insert_ids}{$1} ) {
             $dbh->{mock_last_insert_id} = $dbh->{mock_last_insert_ids}{$1}++;
@@ -653,11 +680,11 @@ sub fetch {
     my ($sth) = @_;
     my $dbh = $sth->{Database};
     unless ($dbh->{mock_can_connect}) {
-        $dbh->DBI::set_err(1, "No connection present");
+        $dbh->set_err(1, "No connection present");
         return;
     }
     unless ($dbh->{mock_can_fetch}) {
-        $dbh->DBI::set_err(1, "Cannot fetch");
+        $dbh->set_err(1, "Cannot fetch");
         return;
     }
     $dbh->{mock_can_fetch}++ if $dbh->{mock_can_fetch} < 0;
@@ -694,11 +721,11 @@ sub fetchrow_hashref {
     # handle any errors since we are grabbing
     # from the tracker directly
     unless ($dbh->{mock_can_connect}) {
-        $dbh->DBI::set_err(1, "No connection present");
+        $dbh->set_err(1, "No connection present");
         return;
     }
     unless ($dbh->{mock_can_fetch}) {
-        $dbh->DBI::set_err(1, "Cannot fetch");
+        $dbh->set_err(1, "Cannot fetch");
         return;
     }
     $dbh->{mock_can_fetch}++ if $dbh->{mock_can_fetch} < 0;
@@ -730,11 +757,11 @@ sub fetchall_hashref {
     # handle any errors since we are grabbing
     # from the tracker directly
     unless ($dbh->{mock_can_connect}) {
-        $dbh->DBI::set_err(1, "No connection present");
+        $dbh->set_err(1, "No connection present");
         return;
     }
     unless ($dbh->{mock_can_fetch}) {
-        $dbh->DBI::set_err(1, "Cannot fetch");
+        $dbh->set_err(1, "Cannot fetch");
         return;
     }
     $dbh->{mock_can_fetch}++ if $dbh->{mock_can_fetch} < 0;
@@ -760,7 +787,7 @@ sub fetchall_hashref {
             }
         }
         unless ($found) {
-            $dbh->DBI::set_err(1, "Could not find key field '$keyfield'");
+            $dbh->set_err(1, "Could not find key field '$keyfield'");
             return;
         }
     }
@@ -1181,6 +1208,12 @@ sub name  { (shift)->{name} }
 sub reset { (shift)->{state_index} = 0 }
 sub num_states { scalar( @{ (shift)->{states} } ) }
 
+sub current_state {
+    my $self = shift;
+    my $idx = $self->{state_index};
+    return $self->{states}[$idx];
+}
+
 sub has_states_left {
     my $self = shift;
     return $self->{state_index} < scalar(@{$self->{states}});
@@ -1192,7 +1225,7 @@ sub verify_statement {
     ($self->has_states_left)
         || die "Session states exhausted, only '" . scalar(@{$self->{states}}) . "' in DBD::Mock::Session (" . $self->{name} . ")";
 
-    my $current_state = $self->{states}->[$self->{state_index}];
+    my $current_state = $self->current_state;
     # make sure our state is good
     (exists ${$current_state}{statement} && exists ${$current_state}{results})
         || die "Bad state '" . $self->{state_index} .  "' in DBD::Mock::Session (" . $self->{name} . ")";
@@ -1224,7 +1257,11 @@ sub verify_statement {
 
 sub verify_bound_params {
     my ($self, $dbh, $params) = @_;
-    my $current_state = $self->{states}->[$self->{state_index}];
+
+     ($self->has_states_left)
+            || die "Session states exhausted, only '" . scalar(@{$self->{states}}) . "' in DBD::Mock::Session (" . $self->{name} . ")";
+
+    my $current_state = $self->current_state;
     if (exists ${$current_state}{bound_params}) {
         my $expected = $current_state->{bound_params};
         (scalar(@{$expected}) == scalar(@{$params}))
@@ -1903,7 +1940,7 @@ Calling C<next> will return the next C<DBD::Mock::StatementTrack> object in the 
 
 B<reset>
 
-This will reset the internal pointer to the begining of the statement history.
+This will reset the internal pointer to the beginning of the statement history.
 
 =back
 

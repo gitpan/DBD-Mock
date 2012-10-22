@@ -5,33 +5,63 @@ use warnings;
 
 my $INSTANCE_COUNT = 1;
 
+# - Class - #
+
 sub new {
     my $class = shift;
-    (@_) || die "You must specify at least one session state";
-    my $session_name;
-    if ( ref( $_[0] ) ) {
-        $session_name = 'Session ' . $INSTANCE_COUNT;
-    }
-    else {
-        $session_name = shift;
-    }
-    my @session_states = @_;
-    (@session_states)
-      || die "You must specify at least one session state";
-    ( ref($_) eq 'HASH' )
-      || die "You must specify session states as HASH refs"
-      foreach @session_states;
+    my $name = ref( $_[0] ) ? "Session $INSTANCE_COUNT" : shift;
     $INSTANCE_COUNT++;
-    return bless {
-        name        => $session_name,
-        states      => \@session_states,
+
+    $class->_verify_states( $name, @_ );
+
+    bless {
+        name        => $name,
+        states      => \@_,
         state_index => 0
-    } => $class;
+    }, $class;
 }
 
-sub name       { (shift)->{name} }
-sub reset      { (shift)->{state_index} = 0 }
-sub num_states { scalar( @{ (shift)->{states} } ) }
+sub _verify_state {
+    my ( $class, $state, $index, $name ) = @_;
+
+    die "You must specify session states as HASH refs"
+      if ref($state) ne 'HASH';
+
+    die "Bad state '$index' in DBD::Mock::Session ($name)"
+      if not exists $state->{statement}
+          or not exists $state->{results};
+
+    my $stmt = $state->{statement};
+    my $ref  = ref $stmt;
+
+    die "Bad 'statement' value '$stmt' in DBD::Mock::Session ($name)",
+      if ref($stmt) ne ''
+          and $ref ne 'CODE'
+          and $ref ne 'Regexp';
+}
+
+sub _verify_states {
+    my ( $class, $name, @states ) = @_;
+
+    die "You must specify at least one session state"
+      if scalar @states == 0;
+
+    for ( 0 .. scalar @states - 1 ) {
+        $class->_verify_state( $states[$_], $_, $name );
+    }
+}
+
+# - Instance - #
+
+sub name {
+    my $self = shift;
+    $self->{name};
+}
+
+sub reset {
+    my $self = shift;
+    $self->{state_index} = 0;
+}
 
 sub current_state {
     my $self = shift;
@@ -41,104 +71,119 @@ sub current_state {
 
 sub has_states_left {
     my $self = shift;
-    return $self->{state_index} < scalar( @{ $self->{states} } );
+    return $self->{state_index} < $self->_num_states;
 }
 
 sub verify_statement {
-    my ( $self, $dbh, $statement ) = @_;
+    my ( $self, $got ) = @_;
 
-    ( $self->has_states_left )
-      || die "Session states exhausted, only '"
-      . scalar( @{ $self->{states} } )
-      . "' in DBD::Mock::Session ("
-      . $self->{name} . ")";
-
-    my $current_state = $self->current_state;
-
-    # make sure our state is good
-    ( exists ${$current_state}{statement} && exists ${$current_state}{results} )
-      || die "Bad state '"
-      . $self->{state_index}
-      . "' in DBD::Mock::Session ("
-      . $self->{name} . ")";
-
-    # try the SQL
-    my $SQL = $current_state->{statement};
-    unless ( ref($SQL) ) {
-        ( $SQL eq $statement )
-          || die
-          "Statement does not match current state in DBD::Mock::Session ("
-          . $self->{name} . ")\n"
-          . "      got: $statement\n"
-          . " expected: $SQL";
-    }
-    elsif ( ref($SQL) eq 'Regexp' ) {
-        ( $statement =~ /$SQL/ )
-          || die
-"Statement does not match current state (with Regexp) in DBD::Mock::Session ("
-          . $self->{name} . ")\n"
-          . "      got: $statement\n"
-          . " expected: $SQL";
-    }
-    elsif ( ref($SQL) eq 'CODE' ) {
-        ( $SQL->( $statement, $current_state ) )
-          || die
-"Statement does not match current state (with CODE ref) in DBD::Mock::Session ("
-          . $self->{name} . ")";
-    }
-    else {
-        die
-"Bad 'statement' value '$SQL' in current state in DBD::Mock::Session ("
-          . $self->{name} . ")";
+    unless ( $self->has_states_left ) {
+        die "Session states exhausted, only '"
+          . $self->_num_states
+          . "' in DBD::Mock::Session ($self->name})";
     }
 
-    # copy the result sets so that
-    # we can re-use the session
-    $dbh->STORE( 'mock_add_resultset' => [ @{ $current_state->{results} } ] );
+    my $state    = $self->current_state;
+    my $expected = $state->{statement};
+    my $ref      = ref($expected);
+
+    if ( $ref eq 'Regexp' and $got !~ /$expected/ ) {
+        die "Statement does not match current state (with Regexp) in "
+          . "DBD::Mock::Session ($self->{name})\n"
+          . "      got: $got\n"
+          . " expected: $expected",
+
+    }
+
+    if ( $ref eq 'CODE' and not $expected->( $got, $state ) ) {
+        die "Statement does not match current state (with CODE ref) in "
+          . "DBD::Mock::Session ($self->{name})";
+    }
+
+    if ( not $ref and $got ne $expected ) {
+        die "Statement does not match current state in "
+          . "DBD::Mock::Session ($self->{name})\n"
+          . "      got: $got\n"
+          . " expected: $expected";
+    }
+}
+
+sub results_for {
+    my ( $self, $statment ) = @_;
+    $self->_find_state_for($statment)->{results};
 }
 
 sub verify_bound_params {
-    my ( $self, $dbh, $params ) = @_;
+    my ( $self, $params ) = @_;
 
     my $current_state = $self->current_state;
     if ( exists ${$current_state}{bound_params} ) {
         my $expected = $current_state->{bound_params};
-        ( scalar( @{$expected} ) == scalar( @{$params} ) )
-          || die
-"Not the same number of bound params in current state in DBD::Mock::Session ("
-          . $self->{name} . ")\n"
-          . "      got: "
-          . scalar( @{$params} ) . "\n"
-          . " expected: "
-          . scalar( @{$expected} );
-        for ( my $i = 0 ; $i < scalar( @{$params} ) ; $i++ ) {
-            no warnings;
-            if ( ref( $expected->[$i] ) eq 'Regexp' ) {
-                ( $params->[$i] =~ /$expected->[$i]/ )
-                  || die
-"Bound param $i do not match (using regexp) in current state in DBD::Mock::Session ("
-                  . $self->{name} . ")\n"
-                  . "      got: "
-                  . $params->[$i] . "\n"
-                  . " expected: "
-                  . $expected->[$i];
-            }
-            else {
-                ( $params->[$i] eq $expected->[$i] )
-                  || die
-"Bound param $i do not match in current state in DBD::Mock::Session ("
-                  . $self->{name} . ")\n"
-                  . "      got: "
-                  . $params->[$i] . "\n"
-                  . " expected: "
-                  . $expected->[$i];
-            }
+
+        if ( scalar @$expected != scalar @$params ) {
+            die "Not the same number of bound params in current state in "
+              . "DBD::Mock::Session ($self->{name})\n"
+              . "      got: @{$params}"
+              . " expected: @{$expected}";
         }
+
+        for ( 0 .. scalar @{$params} - 1 ) {
+            $self->_verify_bound_param( $params->[$_], $expected->[$_], $_ );
+        }
+
     }
 
     # and make sure we go to
     # the next statement
     $self->{state_index}++;
+}
+
+sub _find_state_for {
+    my ( $self, $statement ) = @_;
+
+    foreach ( $self->_remaining_states ) {
+        my $stmt = $_->{statement};
+        my $ref  = ref($stmt);
+
+        return $_ if ( $ref eq 'Regexp' and $statement =~ /$stmt/ );
+        return $_ if ( $ref eq 'CODE' and $stmt->( $statement, $_ ) );
+        return $_ if ( not $ref and $stmt eq $statement );
+    }
+
+    die "Statement '$statement' not found in session ($self->{name})";
+}
+
+sub _num_states {
+    my $self = shift;
+    scalar @{ $self->{states} };
+}
+
+sub _remaining_states {
+    my $self        = shift;
+    my $start_index = $self->{state_index};
+    my $end_index   = $self->_num_states - 1;
+    @{ $self->{states} }[ $start_index .. $end_index ];
+}
+
+sub _verify_bound_param {
+    my ( $self, $got, $expected, $index ) = @_;
+    no warnings;
+
+    my $ref = ref $expected;
+
+    if ( $ref eq 'Regexp' and $got !~ /$expected/ ) {
+        die "Bound param $index do not match (using regexp) "
+          . "in current state in DBD::Mock::Session ($self->{name})"
+          . "      got: $got\n"
+          . " expected: $expected";
+    }
+
+    if ( $got ne $expected ) {
+        die "Bound param $index do not match "
+          . "in current state in DBD::Mock::Session ($self->{name})\n"
+          . "     got: $got\n"
+          . " expected: $expected";
+    }
 }
 
 1;
